@@ -78,6 +78,7 @@ NEWS_TO_SECTOR = {
     "원전 정책": "원전",
 }
 
+
 def load_config():
     if CONFIG_FILE.exists():
         try:
@@ -86,8 +87,10 @@ def load_config():
             return {}
     return {}
 
+
 def save_config(config):
     CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 def previous_business_dates(days_back=18):
     today = datetime.now()
@@ -98,31 +101,41 @@ def previous_business_dates(days_back=18):
             dates.append(d.strftime("%Y%m%d"))
     return dates
 
+
 def fetch_yfinance_change_pct(ticker, period="7d"):
     try:
         data = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False)
         if data is None or data.empty:
             return None, None, "no data"
+
         if isinstance(data.columns, pd.MultiIndex):
             close = data["Close"].iloc[:, 0].dropna()
         else:
             close = data["Close"].dropna()
+
         if len(close) < 2:
             return None, None, "not enough data"
+
         last = float(close.iloc[-1])
         prev = float(close.iloc[-2])
+
         if prev == 0:
             return None, None, "prev close zero"
+
         return (last - prev) / prev * 100, last, None
     except Exception as e:
         return None, None, str(e)
 
+
 @st.cache_data(ttl=60 * 15)
 def fetch_us_market_data():
-    rows, values = [], {}
+    rows = []
+    values = {}
+
     for name, ticker in US_TICKERS.items():
         pct, last, err = fetch_yfinance_change_pct(ticker)
         values[name] = pct
+
         rows.append({
             "지표": name,
             "티커": ticker,
@@ -130,7 +143,9 @@ def fetch_us_market_data():
             "전일 대비(%)": None if pct is None else round(pct, 2),
             "상태": "OK" if err is None else err[:80],
         })
+
     return pd.DataFrame(rows), values
+
 
 @st.cache_data(ttl=60 * 10)
 def fetch_krx_value_top(market="ALL", top_n=50):
@@ -138,22 +153,31 @@ def fetch_krx_value_top(market="ALL", top_n=50):
         return pd.DataFrame(), "", "pykrx 미설치 또는 로딩 실패"
 
     last_error = None
+
     for d in previous_business_dates(18):
         try:
             df = stock.get_market_ohlcv_by_ticker(d, market=market)
+
             if df is None or df.empty:
                 continue
+
             df = df.reset_index().rename(columns={"티커": "ticker"})
             df["종목명"] = df["ticker"].map(lambda x: stock.get_market_ticker_name(x))
+
             for c in ["종가", "등락률", "거래량", "거래대금"]:
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
             df = df.sort_values("거래대금", ascending=False).head(top_n)
             cols = ["종목명", "ticker", "종가", "등락률", "거래량", "거래대금"]
+
             return df[cols], d, None
+
         except Exception as e:
             last_error = str(e)
             continue
+
     return pd.DataFrame(), "", last_error or "KRX 거래대금 데이터를 불러오지 못했습니다."
+
 
 def pct_score(x, strong=1.0):
     if x is None:
@@ -168,10 +192,12 @@ def pct_score(x, strong=1.0):
         return -1
     return 0
 
+
 def trend_score(value, good="down"):
     if value == "flat":
         return 0
     return 1 if value == good else -1
+
 
 def sector_score(value):
     if value == "강세":
@@ -179,6 +205,7 @@ def sector_score(value):
     if value == "약세":
         return -1
     return 0
+
 
 def classify(score):
     if score >= 8:
@@ -189,12 +216,15 @@ def classify(score):
         return "Neutral / 관망 우위", "매수보다 확인이 우선입니다. 거래대금 TOP 단타만 제한적으로 접근합니다."
     return "Risk OFF / 매매 회피", "신규 매수 금지. 보유 종목 리스크 관리가 우선입니다."
 
+
 def infer_sector_defaults(market):
     defaults = {s: "보합" for s in SECTOR_STOCKS}
-    nasdaq, sox, nvda, tesla, oil = (
-        market.get("Nasdaq"), market.get("SOX"), market.get("NVIDIA"),
-        market.get("Tesla"), market.get("WTI Oil")
-    )
+
+    nasdaq = market.get("Nasdaq")
+    sox = market.get("SOX")
+    nvda = market.get("NVIDIA")
+    tesla = market.get("Tesla")
+    oil = market.get("WTI Oil")
 
     if (sox is not None and sox > 0.5) or (nvda is not None and nvda > 1.0):
         defaults["반도체"] = "강세"
@@ -218,21 +248,29 @@ def infer_sector_defaults(market):
 
     return defaults
 
+
 def generate_candidates(strong_sectors, news_triggers):
     candidates = []
+
     for sector in strong_sectors:
         candidates.extend(SECTOR_STOCKS.get(sector, []))
+
     for news in news_triggers:
         sector = NEWS_TO_SECTOR.get(news)
         if sector:
             candidates.extend(SECTOR_STOCKS.get(sector, []))
+
     return list(dict.fromkeys(candidates))
 
+
 def rank_candidates_with_value(candidates, value_df, score, weak_sectors):
+    columns = ["순위", "종목명", "거래대금순위", "등락률", "거래대금", "점수", "판정"]
+
     if not candidates:
-        return pd.DataFrame(columns=["순위", "종목명", "거래대금순위", "등락률", "거래대금", "점수", "판정"])
+        return pd.DataFrame(columns=columns)
 
     value_map = {}
+
     if value_df is not None and not value_df.empty:
         for idx, row in value_df.reset_index(drop=True).iterrows():
             value_map[row["종목명"]] = {
@@ -242,10 +280,12 @@ def rank_candidates_with_value(candidates, value_df, score, weak_sectors):
             }
 
     weak_stock_set = set()
+
     for sector in weak_sectors:
         weak_stock_set.update(SECTOR_STOCKS.get(sector, []))
 
     rows = []
+
     for name in candidates:
         v = value_map.get(name)
         s = 0
@@ -257,6 +297,7 @@ def rank_candidates_with_value(candidates, value_df, score, weak_sectors):
                 s += 3
             else:
                 s += 1
+
             if v["등락률"] > 0:
                 s += 1
             if v["등락률"] >= 3:
@@ -289,56 +330,100 @@ def rank_candidates_with_value(candidates, value_df, score, weak_sectors):
         })
 
     out = pd.DataFrame(rows)
-    out = out.sort_values(["점수", "거래대금순위"], ascending=[False, True], na_position="last").head(10).reset_index(drop=True)
+
+    if out.empty:
+        return pd.DataFrame(columns=columns)
+
+    out = out.sort_values(["점수", "거래대금순위"], ascending=[False, True], na_position="last")
+    out = out.head(10).reset_index(drop=True)
     out.insert(0, "순위", range(1, len(out) + 1))
+
     return out
+
 
 def load_history():
     if HISTORY_FILE.exists():
         return pd.read_csv(HISTORY_FILE)
+
     return pd.DataFrame(columns=["date", "score", "judgment", "top_pick", "strong_sectors", "weak_sectors", "memo"])
+
 
 def save_history(row):
     hist = load_history()
     hist = pd.concat([pd.DataFrame([row]), hist], ignore_index=True)
     hist.to_csv(HISTORY_FILE, index=False, encoding="utf-8-sig")
 
+
 def build_snapshot(score, judgment, strategy, positives, negatives, strong_sectors, weak_sectors, ranked, ban_reasons, memo):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     top = "없음" if ranked.empty else str(ranked.iloc[0]["종목명"])
-    lines = [
-        f"# Daily Market Snapshot - {now}",
-        "",
-        f"## BLUF",
-        f"- 판단: {judgment}",
-        f"- 점수: {score:.1f}",
-        f"- 핵심 후보: {top}",
-        f"- 전략: {strategy}",
-        "",
-        "## 긍정 요인",
-        *[f"- {x}" for x in positives] if positives else ["- 없음"],
-        "",
-        "## 부정 요인",
-        *[f"- {x}" for x in negatives] if negatives else ["- 없음"],
-        "",
-        "## 강세 섹터",
-        f"- {', '.join(strong_sectors) if strong_sectors else '없음'}",
-        "",
-        "## 약세 섹터",
-        f"- {', '.join(weak_sectors) if weak_sectors else '없음'}",
-        "",
-        "## 매매 금지 조건",
-        f"- {', '.join(ban_reasons) if ban_reasons else '주요 금지 조건 없음'}",
-        "",
-        "## 최종 후보",
-    ]
+
+    lines = []
+    lines.append(f"# Daily Market Snapshot - {now}")
+    lines.append("")
+    lines.append("## BLUF")
+    lines.append(f"- 판단: {judgment}")
+    lines.append(f"- 점수: {score:.1f}")
+    lines.append(f"- 핵심 후보: {top}")
+    lines.append(f"- 전략: {strategy}")
+    lines.append("")
+
+    lines.append("## 긍정 요인")
+    if positives:
+        for x in positives:
+            lines.append(f"- {x}")
+    else:
+        lines.append("- 없음")
+    lines.append("")
+
+    lines.append("## 부정 요인")
+    if negatives:
+        for x in negatives:
+            lines.append(f"- {x}")
+    else:
+        lines.append("- 없음")
+    lines.append("")
+
+    lines.append("## 강세 섹터")
+    if strong_sectors:
+        lines.append(f"- {', '.join(strong_sectors)}")
+    else:
+        lines.append("- 없음")
+    lines.append("")
+
+    lines.append("## 약세 섹터")
+    if weak_sectors:
+        lines.append(f"- {', '.join(weak_sectors)}")
+    else:
+        lines.append("- 없음")
+    lines.append("")
+
+    lines.append("## 매매 금지 조건")
+    if ban_reasons:
+        lines.append(f"- {', '.join(ban_reasons)}")
+    else:
+        lines.append("- 주요 금지 조건 없음")
+    lines.append("")
+
+    lines.append("## 최종 후보")
     if ranked.empty:
         lines.append("- 없음")
     else:
         for _, r in ranked.head(5).iterrows():
-            lines.append(f"- {r['종목명']} / 판정: {r['판정']} / 거래대금순위: {r['거래대금순위']} / 등락률: {r['등락률']}%")
-    lines += ["", "## 메모", memo or "- 없음"]
+            lines.append(
+                f"- {r['종목명']} / 판정: {r['판정']} / "
+                f"거래대금순위: {r['거래대금순위']} / 등락률: {r['등락률']}%"
+            )
+    lines.append("")
+
+    lines.append("## 메모")
+    if memo:
+        lines.append(memo)
+    else:
+        lines.append("- 없음")
+
     return "\n".join(lines)
+
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
 st.title("📊 Daily Market Assistant Auto")
@@ -348,6 +433,7 @@ st.caption("데이터 수집 → 시장 판단 → 거래대금 필터 → 최�
 # Top Guide
 # ===============================
 st.markdown("## 📘 사용 가이드")
+
 with st.expander("앱 해석법과 실전 사용 순서 보기", expanded=True):
     st.markdown("""
 ### BLUF
@@ -384,15 +470,29 @@ TOP10을 모두 사는 앱이 아닙니다. **최종 후보 중 1~2개만 보고
 with st.sidebar:
     st.header("자동화 옵션")
     config = load_config()
+
     auto_refresh = st.toggle("자동 새로고침", value=config.get("auto_refresh", False))
-    refresh_minutes = st.number_input("새로고침 간격(분)", min_value=5, max_value=120, value=int(config.get("refresh_minutes", 15)), step=5)
+    refresh_minutes = st.number_input(
+        "새로고침 간격(분)",
+        min_value=5,
+        max_value=120,
+        value=int(config.get("refresh_minutes", 15)),
+        step=5,
+    )
     auto_save_snapshot = st.toggle("스냅샷 파일 자동 생성", value=config.get("auto_save_snapshot", True))
+
     if st.button("설정 저장"):
-        save_config({"auto_refresh": auto_refresh, "refresh_minutes": refresh_minutes, "auto_save_snapshot": auto_save_snapshot})
+        save_config({
+            "auto_refresh": auto_refresh,
+            "refresh_minutes": refresh_minutes,
+            "auto_save_snapshot": auto_save_snapshot,
+        })
         st.success("설정 저장 완료")
+
     st.divider()
     st.write("- 미국/매크로: yfinance")
     st.write("- 한국 거래대금: pykrx")
+
     if st.button("전체 데이터 새로고침", type="primary"):
         fetch_us_market_data.clear()
         fetch_krx_value_top.clear()
@@ -400,7 +500,7 @@ with st.sidebar:
 
 if auto_refresh:
     st.info(f"자동 새로고침 활성화: {refresh_minutes}분 간격")
-    st.markdown(f"<meta http-equiv='refresh' content='{int(refresh_minutes)*60}'>", unsafe_allow_html=True)
+    st.markdown(f"<meta http-equiv='refresh' content='{int(refresh_minutes) * 60}'>", unsafe_allow_html=True)
 
 us_df, us_values = fetch_us_market_data()
 
@@ -410,9 +510,14 @@ st.dataframe(us_df, use_container_width=True, hide_index=True)
 st.subheader("2. 핵심 입력값 보정")
 cols = st.columns(4)
 manual_values = {}
-names = ["Dow Jones", "S&P 500", "Nasdaq", "SOX", "NVIDIA", "Tesla", "VIX", "US 10Y Yield", "Dollar Index", "WTI Oil", "USD/KRW"]
+names = [
+    "Dow Jones", "S&P 500", "Nasdaq", "SOX", "NVIDIA", "Tesla",
+    "VIX", "US 10Y Yield", "Dollar Index", "WTI Oil", "USD/KRW"
+]
+
 for i, name in enumerate(names):
     default = us_values.get(name)
+
     with cols[i % 4]:
         manual_values[name] = st.number_input(
             f"{name} 전일 대비(%)",
@@ -426,6 +531,7 @@ market_choice = st.selectbox("시장", ["ALL", "KOSPI", "KOSDAQ"], index=0)
 top_n = st.slider("거래대금 상위 조회 개수", 20, 100, 50, 10)
 
 krx_df, krx_date, krx_err = fetch_krx_value_top(market_choice, top_n)
+
 if krx_err:
     st.warning(f"한국 거래대금 데이터 로드 제한: {krx_err}")
 else:
@@ -433,28 +539,57 @@ else:
     st.dataframe(krx_df, use_container_width=True, hide_index=True)
 
 st.subheader("4. 매크로 방향")
+
+
 def infer_trend(name):
     v = manual_values.get(name)
+
     if v is None or abs(v) < 0.05:
         return "flat"
+
     return "up" if v > 0 else "down"
 
+
 m1, m2, m3, m4 = st.columns(4)
+
 with m1:
-    rate = st.selectbox("미국 10년물 금리", ["down", "flat", "up"], index=["down", "flat", "up"].index(infer_trend("US 10Y Yield")))
+    rate = st.selectbox(
+        "미국 10년물 금리",
+        ["down", "flat", "up"],
+        index=["down", "flat", "up"].index(infer_trend("US 10Y Yield")),
+    )
+
 with m2:
-    dollar = st.selectbox("달러 인덱스", ["down", "flat", "up"], index=["down", "flat", "up"].index(infer_trend("Dollar Index")))
+    dollar = st.selectbox(
+        "달러 인덱스",
+        ["down", "flat", "up"],
+        index=["down", "flat", "up"].index(infer_trend("Dollar Index")),
+    )
+
 with m3:
-    oil = st.selectbox("국제유가", ["down", "flat", "up"], index=["down", "flat", "up"].index(infer_trend("WTI Oil")))
+    oil = st.selectbox(
+        "국제유가",
+        ["down", "flat", "up"],
+        index=["down", "flat", "up"].index(infer_trend("WTI Oil")),
+    )
+
 with m4:
-    vix = st.selectbox("VIX", ["down", "flat", "up"], index=["down", "flat", "up"].index(infer_trend("VIX")))
+    vix = st.selectbox(
+        "VIX",
+        ["down", "flat", "up"],
+        index=["down", "flat", "up"].index(infer_trend("VIX")),
+    )
 
 st.subheader("5. 수급·뉴스·섹터")
+
 f1, f2, f3 = st.columns(3)
+
 with f1:
     foreign_flow = st.selectbox("외국인 수급 입력", ["순매수", "중립", "순매도"], index=1)
+
 with f2:
     volume_strength = st.selectbox("체감 거래량", ["강함", "보통", "약함"], index=1)
+
 with f3:
     korea_gap = st.selectbox("한국시장 갭 예상", ["갭상승", "보합", "갭하락"], index=1)
 
@@ -463,20 +598,28 @@ news_triggers = st.multiselect("뉴스 트리거", list(NEWS_TO_SECTOR.keys()))
 sector_defaults = infer_sector_defaults(manual_values)
 sector_inputs = {}
 sector_cols = st.columns(4)
+
 for i, sector in enumerate(SECTOR_STOCKS.keys()):
     default = sector_defaults.get(sector, "보합")
+
     with sector_cols[i % 4]:
-        sector_inputs[sector] = st.selectbox(sector, ["강세", "보합", "약세"], index=["강세", "보합", "약세"].index(default))
+        sector_inputs[sector] = st.selectbox(
+            sector,
+            ["강세", "보합", "약세"],
+            index=["강세", "보합", "약세"].index(default),
+        )
 
 memo = st.text_area("오늘 메모", placeholder="예: 외국인 선물 매수, 방산 수출 뉴스, 조선 수주 뉴스 등")
 
 score = 0
-positives, negatives = [], []
+positives = []
+negatives = []
 
 for name in ["Dow Jones", "S&P 500", "Nasdaq", "SOX", "NVIDIA", "Tesla"]:
     v = manual_values.get(name)
     s = pct_score(v)
     score += s
+
     if s > 0:
         positives.append(f"{name} {v:+.2f}%")
     elif s < 0:
@@ -485,6 +628,7 @@ for name in ["Dow Jones", "S&P 500", "Nasdaq", "SOX", "NVIDIA", "Tesla"]:
 for label, value in [("미국 10년물 금리", rate), ("달러 인덱스", dollar), ("VIX", vix)]:
     s = trend_score(value, good="down")
     score += s
+
     if s > 0:
         positives.append(f"{label} 하락")
     elif s < 0:
@@ -518,10 +662,13 @@ elif korea_gap == "갭하락":
     score -= 0.5
     negatives.append("한국시장 갭하락 예상")
 
-strong_sectors, weak_sectors = [], []
+strong_sectors = []
+weak_sectors = []
+
 for sector, value in sector_inputs.items():
     s = sector_score(value)
     score += s
+
     if s > 0:
         strong_sectors.append(sector)
     elif s < 0:
@@ -529,6 +676,7 @@ for sector, value in sector_inputs.items():
 
 for news in news_triggers:
     sector = NEWS_TO_SECTOR.get(news)
+
     if sector:
         score += 1
         positives.append(f"뉴스 트리거: {news}")
@@ -538,14 +686,18 @@ candidates = generate_candidates(strong_sectors, news_triggers)
 ranked = rank_candidates_with_value(candidates, krx_df, score, weak_sectors)
 
 ban_reasons = []
+
 if manual_values.get("VIX", 0) > 25:
     ban_reasons.append("VIX 급등")
+
 if manual_values.get("Nasdaq", 0) < -2:
     ban_reasons.append("나스닥 급락")
+
 if foreign_flow == "순매도" and volume_strength == "약함":
     ban_reasons.append("외국인 순매도 + 거래량 약함")
 
 st.subheader("6. 최종 분석")
+
 r1, r2, r3, r4 = st.columns(4)
 r1.metric("종합 점수", f"{score:.1f}")
 r2.metric("판단", judgment)
@@ -553,6 +705,7 @@ r3.metric("강세 섹터", len(strong_sectors))
 r4.metric("거래대금 연동 후보", 0 if ranked.empty else len(ranked))
 
 st.markdown("### 🧠 오늘 한줄 가이드")
+
 if ban_reasons:
     st.error(" / ".join(ban_reasons) + " → 매매 금지 또는 규모 축소")
 elif score >= 8:
@@ -569,22 +722,34 @@ st.write(f"**오늘 판단:** {judgment}")
 st.write(f"**전략:** {strategy}")
 
 left, right = st.columns(2)
+
 with left:
     st.markdown("#### 긍정 요인")
-    for p in positives or ["뚜렷한 긍정 요인 없음"]:
-        st.write(f"- {p}")
+
+    if positives:
+        for p in positives:
+            st.write(f"- {p}")
+    else:
+        st.write("- 뚜렷한 긍정 요인 없음")
+
 with right:
     st.markdown("#### 부정 요인")
-    for n in negatives or ["뚜렷한 부정 요인 없음"]:
-        st.write(f"- {n}")
+
+    if negatives:
+        for n in negatives:
+            st.write(f"- {n}")
+    else:
+        st.write("- 뚜렷한 부정 요인 없음")
 
 st.markdown("### 🚀 거래대금 필터 반영 최종 후보")
+
 if ranked.empty:
     st.warning("최종 후보가 없습니다. 강세 섹터/뉴스 트리거를 확인하거나 오늘은 관망이 적절합니다.")
 else:
     st.dataframe(ranked, use_container_width=True, hide_index=True)
     top_pick = ranked.iloc[0]["종목명"]
     top_verdict = ranked.iloc[0]["판정"]
+
     if score >= 8 and top_verdict == "최우선":
         st.success(f"오늘 핵심 후보: {top_pick} / 조건: 강세장 + 거래대금 확인")
     elif score >= 4:
@@ -593,6 +758,7 @@ else:
         st.warning(f"관찰 후보: {top_pick} / 시장 점수가 낮아 추격 매수 금지")
 
 st.markdown("### ⏱️ 진입·리스크 가이드")
+
 if score >= 8:
     st.write("- 진입: 시초 20~30% → 눌림 30% → 고점 돌파 확인 후 나머지")
     st.write("- 손절: -3% 또는 VWAP/당일 저점 이탈")
@@ -608,14 +774,30 @@ else:
     st.write("- 신규 매수 금지. 현금 비중 유지")
 
 with st.expander("섹터별 확장 종목 풀"):
-    sector_df = pd.DataFrame([{"섹터": k, "종목 풀": ", ".join(v)} for k, v in SECTOR_STOCKS.items()])
+    sector_df = pd.DataFrame([
+        {"섹터": k, "종목 풀": ", ".join(v)}
+        for k, v in SECTOR_STOCKS.items()
+    ])
     st.dataframe(sector_df, use_container_width=True, hide_index=True)
 
-snapshot = build_snapshot(score, judgment, strategy, positives, negatives, strong_sectors, weak_sectors, ranked, ban_reasons, memo)
+snapshot = build_snapshot(
+    score=score,
+    judgment=judgment,
+    strategy=strategy,
+    positives=positives,
+    negatives=negatives,
+    strong_sectors=strong_sectors,
+    weak_sectors=weak_sectors,
+    ranked=ranked,
+    ban_reasons=ban_reasons,
+    memo=memo,
+)
+
 if auto_save_snapshot:
     SNAPSHOT_FILE.write_text(snapshot, encoding="utf-8")
 
 col_a, col_b, col_c = st.columns(3)
+
 with col_a:
     if st.button("오늘 분석 기록 저장"):
         save_history({
@@ -628,17 +810,30 @@ with col_a:
             "memo": memo,
         })
         st.success("저장했습니다.")
+
 with col_b:
-    st.download_button("오늘 요약 다운로드", data=snapshot, file_name="today_market_snapshot.md", mime="text/markdown")
+    st.download_button(
+        "오늘 요약 다운로드",
+        data=snapshot,
+        file_name="today_market_snapshot.md",
+        mime="text/markdown",
+    )
+
 with col_c:
     if st.button("스냅샷 파일 다시 생성"):
         SNAPSHOT_FILE.write_text(snapshot, encoding="utf-8")
         st.success("today_market_snapshot.md 생성 완료")
 
 st.subheader("7. 저장된 기록")
+
 history = load_history()
 st.dataframe(history, use_container_width=True, hide_index=True)
 
 if not history.empty:
     csv = history.to_csv(index=False, encoding="utf-8-sig")
-    st.download_button("기록 CSV 다운로드", data=csv, file_name="market_history.csv", mime="text/csv")
+    st.download_button(
+        "기록 CSV 다운로드",
+        data=csv,
+        file_name="market_history.csv",
+        mime="text/csv",
+    )
