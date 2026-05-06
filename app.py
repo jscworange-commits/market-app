@@ -163,57 +163,28 @@ def fetch_krx_value_top(market_choice, top_n):
 
         today_dt = datetime.today()
         last_error = None
-        df = pd.DataFrame()
-        used_date = None
 
-        # 최근 10일 중 정상 조회되는 날짜 찾기
         for i in range(0, 10):
             date_str = (today_dt - timedelta(days=i)).strftime("%Y%m%d")
 
             try:
-                # OHLCV가 아니라 시총/거래대금 데이터 사용
                 temp = stock.get_market_cap_by_ticker(date_str, market=market)
 
                 if temp is not None and not temp.empty:
-                    df = temp.copy()
-                    used_date = date_str
-                    break
+                    df = temp.copy().reset_index()
+
+                    # 진단용: 실제 컬럼명 확인
+                    return df.head(top_n), date_str, f"DEBUG columns: {list(df.columns)}"
 
             except Exception as e:
                 last_error = str(e)
                 continue
 
-        if df is None or df.empty:
-            return pd.DataFrame(), None, f"KRX 거래대금 데이터 조회 실패: {last_error}"
-
-        df = df.reset_index()
-
-        if "티커" not in df.columns:
-            df = df.rename(columns={df.columns[0]: "티커"})
-
-        def get_name_safe(ticker):
-            try:
-                return stock.get_market_ticker_name(ticker)
-            except Exception:
-                return ticker
-
-        df["종목명"] = df["티커"].apply(get_name_safe)
-
-        # 필요한 컬럼 방어
-        for col in ["종가", "시가총액", "거래량", "거래대금", "상장주식수"]:
-            if col not in df.columns:
-                df[col] = 0
-
-        df = df.sort_values("거래대금", ascending=False).head(top_n)
-
-        result_cols = ["티커", "종목명", "종가", "거래량", "거래대금", "시가총액"]
-        df = df[result_cols]
-
-        return df, used_date, None
+        return pd.DataFrame(), None, f"KRX 거래대금 데이터 조회 실패: {last_error}"
 
     except Exception as e:
         return pd.DataFrame(), None, str(e)
-        
+
 def pct_score(x, strong=1.0):
     if x is None:
         return 0
