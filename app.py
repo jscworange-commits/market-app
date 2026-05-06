@@ -150,34 +150,30 @@ def fetch_us_market_data():
 
 
 @st.cache_data(ttl=60 * 10)
-def fetch_krx_value_top(market="ALL", top_n=50):
-   if not PYKRX_AVAILABLE:
-    st.warning("한국 거래대금 데이터 로드 제한: pykrx 로딩 실패")
-    st.code(PYKRX_ERROR)
+def fetch_krx_value_top(market_choice, top_n):
+    if not PYKRX_AVAILABLE:
+        return pd.DataFrame(), None, PYKRX_ERROR
 
-    last_error = None
+    try:
+        today = datetime.today().strftime("%Y%m%d")
 
-    for d in previous_business_dates(18):
-        try:
-            df = stock.get_market_ohlcv_by_ticker(d, market=market)
+        market = "ALL"
+        if market_choice == "KOSPI":
+            market = "KOSPI"
+        elif market_choice == "KOSDAQ":
+            market = "KOSDAQ"
 
-            if df is None or df.empty:
-                continue
+        df = stock.get_market_ohlcv_by_ticker(today, market=market)
 
-            df = df.reset_index().rename(columns={"티커": "ticker"})
-            df["종목명"] = df["ticker"].map(lambda x: stock.get_market_ticker_name(x))
+        if df is None or df.empty:
+            return pd.DataFrame(), today, "KRX 데이터가 비어 있습니다."
 
-            for c in ["종가", "등락률", "거래량", "거래대금"]:
-                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df = df.sort_values("거래대금", ascending=False).head(top_n)
 
-            df = df.sort_values("거래대금", ascending=False).head(top_n)
-            cols = ["종목명", "ticker", "종가", "등락률", "거래량", "거래대금"]
+        return df, today, None
 
-            return df[cols], d, None
-
-        except Exception as e:
-            last_error = str(e)
-            continue
+    except Exception as e:
+        return pd.DataFrame(), None, str(e)
 
     return pd.DataFrame(), "", last_error or "KRX 거래대금 데이터를 불러오지 못했습니다."
 
