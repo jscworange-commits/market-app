@@ -9,8 +9,10 @@ import yfinance as yf
 try:
     from pykrx import stock
     PYKRX_AVAILABLE = True
-except Exception:
+    PYKRX_ERROR = None
+except Exception as e:
     PYKRX_AVAILABLE = False
+    PYKRX_ERROR = str(e)
 
 
 APP_TITLE = "Daily Market Assistant Auto"
@@ -149,8 +151,9 @@ def fetch_us_market_data():
 
 @st.cache_data(ttl=60 * 10)
 def fetch_krx_value_top(market="ALL", top_n=50):
-    if not PYKRX_AVAILABLE:
-        return pd.DataFrame(), "", "pykrx 미설치 또는 로딩 실패"
+   if not PYKRX_AVAILABLE:
+    st.warning("한국 거래대금 데이터 로드 제한: pykrx 로딩 실패")
+    st.code(PYKRX_ERROR)
 
     last_error = None
 
