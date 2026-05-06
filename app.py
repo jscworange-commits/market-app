@@ -162,7 +162,6 @@ def fetch_krx_value_top(market_choice, top_n):
             market = "KOSDAQ"
 
         today_dt = datetime.today()
-
         last_error = None
         df = pd.DataFrame()
         used_date = None
@@ -172,7 +171,8 @@ def fetch_krx_value_top(market_choice, top_n):
             date_str = (today_dt - timedelta(days=i)).strftime("%Y%m%d")
 
             try:
-                temp = stock.get_market_ohlcv_by_ticker(date_str, market=market)
+                # OHLCV가 아니라 시총/거래대금 데이터 사용
+                temp = stock.get_market_cap_by_ticker(date_str, market=market)
 
                 if temp is not None and not temp.empty:
                     df = temp.copy()
@@ -184,7 +184,7 @@ def fetch_krx_value_top(market_choice, top_n):
                 continue
 
         if df is None or df.empty:
-            return pd.DataFrame(), None, f"KRX 데이터 조회 실패: {last_error}"
+            return pd.DataFrame(), None, f"KRX 거래대금 데이터 조회 실패: {last_error}"
 
         df = df.reset_index()
 
@@ -199,11 +199,15 @@ def fetch_krx_value_top(market_choice, top_n):
 
         df["종목명"] = df["티커"].apply(get_name_safe)
 
-        for col in ["시가", "고가", "저가", "종가", "거래량", "거래대금", "등락률"]:
+        # 필요한 컬럼 방어
+        for col in ["종가", "시가총액", "거래량", "거래대금", "상장주식수"]:
             if col not in df.columns:
                 df[col] = 0
 
         df = df.sort_values("거래대금", ascending=False).head(top_n)
+
+        result_cols = ["티커", "종목명", "종가", "거래량", "거래대금", "시가총액"]
+        df = df[result_cols]
 
         return df, used_date, None
 
