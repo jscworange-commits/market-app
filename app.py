@@ -155,26 +155,42 @@ def fetch_krx_value_top(market_choice, top_n):
         return pd.DataFrame(), None, PYKRX_ERROR
 
     try:
-        today = datetime.today().strftime("%Y%m%d")
-
         market = "ALL"
         if market_choice == "KOSPI":
             market = "KOSPI"
         elif market_choice == "KOSDAQ":
             market = "KOSDAQ"
 
-        df = stock.get_market_ohlcv_by_ticker(today, market=market)
+        today_dt = datetime.today()
+
+        last_error = None
+        df = pd.DataFrame()
+        used_date = None
+
+        # 최근 10일 중 정상 조회되는 날짜 찾기
+        for i in range(0, 10):
+            date_str = (today_dt - timedelta(days=i)).strftime("%Y%m%d")
+
+            try:
+                temp = stock.get_market_ohlcv_by_ticker(date_str, market=market)
+
+                if temp is not None and not temp.empty:
+                    df = temp.copy()
+                    used_date = date_str
+                    break
+
+            except Exception as e:
+                last_error = str(e)
+                continue
 
         if df is None or df.empty:
-            return pd.DataFrame(), today, "KRX 데이터가 비어 있습니다."
+            return pd.DataFrame(), None, f"KRX 데이터 조회 실패: {last_error}"
 
         df = df.reset_index()
 
-        # 첫 번째 컬럼을 티커로 통일
         if "티커" not in df.columns:
             df = df.rename(columns={df.columns[0]: "티커"})
 
-        # 종목명 추가
         def get_name_safe(ticker):
             try:
                 return stock.get_market_ticker_name(ticker)
@@ -183,28 +199,17 @@ def fetch_krx_value_top(market_choice, top_n):
 
         df["종목명"] = df["티커"].apply(get_name_safe)
 
-        # 거래대금이 없으면 거래량 기준으로 대체
-        if "거래대금" not in df.columns:
-            if "거래량" in df.columns:
-                df["거래대금"] = df["거래량"]
-            else:
-                df["거래대금"] = 0
-
-        # 필요한 최소 컬럼만 방어적으로 생성
-        for col in ["티커", "종목명", "거래량", "거래대금", "등락률"]:
+        for col in ["시가", "고가", "저가", "종가", "거래량", "거래대금", "등락률"]:
             if col not in df.columns:
-                df[col] = None
+                df[col] = 0
 
         df = df.sort_values("거래대금", ascending=False).head(top_n)
 
-        result_cols = ["티커", "종목명", "거래량", "거래대금", "등락률"]
-        df = df[result_cols]
-
-        return df, today, None
+        return df, used_date, None
 
     except Exception as e:
         return pd.DataFrame(), None, str(e)
-
+        
 def pct_score(x, strong=1.0):
     if x is None:
         return 0
