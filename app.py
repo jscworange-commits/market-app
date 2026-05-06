@@ -168,6 +168,18 @@ def fetch_krx_value_top(market_choice, top_n):
         if df is None or df.empty:
             return pd.DataFrame(), today, "KRX 데이터가 비어 있습니다."
 
+        # pykrx 컬럼명 정리
+        df = df.reset_index()
+
+        if "티커" not in df.columns:
+            first_col = df.columns[0]
+            df = df.rename(columns={first_col: "티커"})
+
+        # 숫자 컬럼만 안전하게 처리
+        for col in ["시가", "고가", "저가", "종가", "거래량", "거래대금", "등락률"]:
+            if col not in df.columns:
+                df[col] = 0
+
         df = df.sort_values("거래대금", ascending=False).head(top_n)
 
         return df, today, None
