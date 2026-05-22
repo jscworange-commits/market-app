@@ -151,39 +151,89 @@ def fetch_us_market_data():
 
 @st.cache_data(ttl=60 * 10)
 def fetch_krx_value_top(market_choice, top_n):
+    """
+    한국 거래대금 TOP 데이터 조회.
+    pykrx가 Streamlit Cloud에서 날짜/응답 형식에 따라 실패할 수 있으므로
+    OHLCV → 시가총액 순서로 시도하고, 실패 시 앱 전체가 멈추지 않도록 빈 DF를 반환합니다.
+    """
+    columns = ["티커", "종목명", "종가", "등락률", "거래량", "거래대금", "시가총액"]
+
     if not PYKRX_AVAILABLE:
-        return pd.DataFrame(), None, PYKRX_ERROR
+        return pd.DataFrame(columns=columns), None, PYKRX_ERROR
 
-    try:
-        market = "ALL"
-        if market_choice == "KOSPI":
-            market = "KOSPI"
-        elif market_choice == "KOSDAQ":
-            market = "KOSDAQ"
+    market = "ALL"
+    if market_choice == "KOSPI":
+        market = "KOSPI"
+    elif market_choice == "KOSDAQ":
+        market = "KOSDAQ"
 
-        today_dt = datetime.today()
-        last_error = None
+    last_error = None
 
-        for i in range(0, 10):
-            date_str = (today_dt - timedelta(days=i)).strftime("%Y%m%d")
-
+    for date_str in previous_business_dates(18):
+        for fetch_name, fetch_func in [
+            ("ohlcv", stock.get_market_ohlcv_by_ticker),
+            ("market_cap", stock.get_market_cap_by_ticker),
+        ]:
             try:
-                temp = stock.get_market_cap_by_ticker(date_str, market=market)
+                temp = fetch_func(date_str, market=market)
 
-                if temp is not None and not temp.empty:
-                    df = temp.copy().reset_index()
+                if temp is None or temp.empty:
+                    continue
 
-                    # 진단용: 실제 컬럼명 확인
-                    return df.head(top_n), date_str, f"DEBUG columns: {list(df.columns)}"
+                df = temp.copy().reset_index()
+
+                if "티커" not in df.columns:
+                    df = df.rename(columns={df.columns[0]: "티커"})
+
+                # pykrx 버전/응답 형식에 따른 컬럼명 차이를 흡수
+                rename_map = {
+                    "ticker": "티커",
+                    "Ticker": "티커",
+                    "종목코드": "티커",
+                    "Close": "종가",
+                    "close": "종가",
+                    "Volume": "거래량",
+                    "volume": "거래량",
+                    "Amount": "거래대금",
+                    "amount": "거래대금",
+                    "MarketCap": "시가총액",
+                    "market_cap": "시가총액",
+                    "Change": "등락률",
+                    "change": "등락률",
+                }
+                df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+                if "종목명" not in df.columns:
+                    def get_name_safe(ticker):
+                        try:
+                            return stock.get_market_ticker_name(str(ticker).zfill(6))
+                        except Exception:
+                            return str(ticker)
+                    df["종목명"] = df["티커"].apply(get_name_safe)
+
+                # 필요한 컬럼이 없으면 방어적으로 생성
+                for col in columns:
+                    if col not in df.columns:
+                        df[col] = 0 if col not in ["티커", "종목명"] else ""
+
+                # 거래대금이 없거나 0이면 종가*거래량으로 추정
+                if ("거래대금" not in df.columns) or (pd.to_numeric(df["거래대금"], errors="coerce").fillna(0).sum() == 0):
+                    close = pd.to_numeric(df.get("종가", 0), errors="coerce").fillna(0)
+                    volume = pd.to_numeric(df.get("거래량", 0), errors="coerce").fillna(0)
+                    df["거래대금"] = close * volume
+
+                for col in ["종가", "등락률", "거래량", "거래대금", "시가총액"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+                df = df.sort_values("거래대금", ascending=False).head(top_n)
+                return df[columns], f"{date_str} ({fetch_name})", None
 
             except Exception as e:
                 last_error = str(e)
                 continue
 
-        return pd.DataFrame(), None, f"KRX 거래대금 데이터 조회 실패: {last_error}"
+    return pd.DataFrame(columns=columns), None, f"KRX 거래대금 데이터 조회 실패: {last_error}"
 
-    except Exception as e:
-        return pd.DataFrame(), None, str(e)
 
 def pct_score(x, strong=1.0):
     if x is None:
@@ -269,70 +319,162 @@ def generate_candidates(strong_sectors, news_triggers):
     return list(dict.fromkeys(candidates))
 
 
+def safe_float(x, default=0.0):
+    try:
+        if x is None or pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def get_recent_top_picks(n=5):
+    """
+    최근 저장 이력의 top_pick을 읽어 반복 추천에 패널티를 주기 위한 함수.
+    Streamlit Cloud에서는 파일 저장이 영구 보장되지 않을 수 있지만,
+    같은 세션/재실행 중 반복 추천 완화에는 도움이 됩니다.
+    """
+    try:
+        hist = load_history()
+        if hist is None or hist.empty or "top_pick" not in hist.columns:
+            return []
+        return [x for x in hist["top_pick"].dropna().astype(str).head(n).tolist() if x]
+    except Exception:
+        return []
+
+
+def get_sector_for_stock(stock_name):
+    for sector, stocks in SECTOR_STOCKS.items():
+        if stock_name in stocks:
+            return sector
+    return ""
+
+
 def rank_candidates_with_value(candidates, value_df, score, weak_sectors):
-    columns = ["순위", "종목명", "거래대금순위", "등락률", "거래대금", "점수", "판정"]
+    columns = [
+        "순위", "종목명", "섹터", "거래대금순위", "등락률", "거래대금",
+        "동적점수", "반복패널티", "점수", "판정", "추천근거"
+    ]
 
     if not candidates:
         return pd.DataFrame(columns=columns)
 
     value_map = {}
 
-    if value_df is not None and not value_df.empty:
-        for idx, row in value_df.reset_index(drop=True).iterrows():
-            value_map[row["종목명"]] = {
+    if value_df is not None and not value_df.empty and "종목명" in value_df.columns:
+        work = value_df.copy().reset_index(drop=True)
+
+        if "거래대금" not in work.columns:
+            work["거래대금"] = 0
+        if "등락률" not in work.columns:
+            work["등락률"] = 0
+
+        work["거래대금"] = pd.to_numeric(work["거래대금"], errors="coerce").fillna(0)
+        work["등락률"] = pd.to_numeric(work["등락률"], errors="coerce").fillna(0)
+        work = work.sort_values("거래대금", ascending=False).reset_index(drop=True)
+
+        for idx, row in work.iterrows():
+            value_map[str(row["종목명"])] = {
                 "rank": idx + 1,
-                "등락률": float(row.get("등락률", 0)),
-                "거래대금": float(row.get("거래대금", 0)),
+                "등락률": safe_float(row.get("등락률", 0)),
+                "거래대금": safe_float(row.get("거래대금", 0)),
             }
 
     weak_stock_set = set()
-
     for sector in weak_sectors:
         weak_stock_set.update(SECTOR_STOCKS.get(sector, []))
 
+    recent_picks = set(get_recent_top_picks(5))
+    today_offset = datetime.now().toordinal() % 7
+
     rows = []
 
-    for name in candidates:
+    for i, name in enumerate(candidates):
         v = value_map.get(name)
-        s = 0
+        stock_sector = get_sector_for_stock(name)
+
+        # 후보군 앞쪽 종목이 매일 반복되는 문제를 줄이기 위한 일자별 순환 보정
+        rotation_score = ((i + today_offset) % 7) * 0.12
+
+        dynamic_score = 0.0
+        reasons = []
 
         if v:
-            if v["rank"] <= 20:
-                s += 4
-            elif v["rank"] <= 50:
-                s += 3
+            rank = v["rank"]
+            change_rate = v["등락률"]
+            value_amt = v["거래대금"]
+
+            if rank <= 20:
+                dynamic_score += 4.0
+                reasons.append("거래대금 TOP20")
+            elif rank <= 50:
+                dynamic_score += 3.0
+                reasons.append("거래대금 TOP50")
+            elif rank <= 100:
+                dynamic_score += 1.5
+                reasons.append("거래대금 TOP100")
             else:
-                s += 1
+                dynamic_score += 0.5
 
-            if v["등락률"] > 0:
-                s += 1
-            if v["등락률"] >= 3:
-                s += 1
+            # 너무 과열된 종목은 추격 방지 차원에서 감점
+            if -1.5 <= change_rate <= 4.5:
+                dynamic_score += 1.2
+                reasons.append("등락률 양호")
+            elif change_rate > 4.5:
+                dynamic_score += 0.3
+                dynamic_score -= min((change_rate - 4.5) * 0.25, 1.5)
+                reasons.append("급등 과열 주의")
+            elif change_rate < -1.5:
+                dynamic_score -= 1.0
+                reasons.append("약세 흐름")
+
+            if value_amt >= 100_000_000_000:
+                dynamic_score += 1.0
+            elif value_amt >= 30_000_000_000:
+                dynamic_score += 0.5
         else:
-            s -= 1
+            # KRX 데이터 매칭이 안 되더라도 완전 제외하지 않고 낮은 기본점수만 부여
+            rank = None
+            change_rate = None
+            value_amt = None
+            dynamic_score -= 0.5
+            reasons.append("거래대금 미확인")
 
-        if name in weak_stock_set:
-            s -= 3
+        repeat_penalty = -1.5 if name in recent_picks else 0.0
+        if repeat_penalty:
+            reasons.append("최근 추천 반복 감점")
 
+        weak_penalty = -3.0 if name in weak_stock_set else 0.0
+        if weak_penalty:
+            reasons.append("약세 섹터 감점")
+
+        risk_penalty = 0.0
         if score < 0 and name in ["카카오", "엘앤에프", "에코프로비엠", "솔트룩스", "마음AI"]:
-            s -= 2
+            risk_penalty = -2.0
+            reasons.append("Risk OFF 고변동주 감점")
 
-        if s >= 5:
+        final_score = dynamic_score + repeat_penalty + weak_penalty + risk_penalty + rotation_score
+
+        if final_score >= 5:
             verdict = "최우선"
-        elif s >= 3:
+        elif final_score >= 3:
             verdict = "관심"
-        elif s >= 1:
+        elif final_score >= 1:
             verdict = "관찰"
         else:
             verdict = "제외/관망"
 
         rows.append({
             "종목명": name,
-            "거래대금순위": v["rank"] if v else None,
-            "등락률": round(v["등락률"], 2) if v else None,
-            "거래대금": round(v["거래대금"], 0) if v else None,
-            "점수": s,
+            "섹터": stock_sector,
+            "거래대금순위": rank,
+            "등락률": round(change_rate, 2) if change_rate is not None else None,
+            "거래대금": round(value_amt, 0) if value_amt is not None else None,
+            "동적점수": round(dynamic_score, 2),
+            "반복패널티": repeat_penalty,
+            "점수": round(final_score, 2),
             "판정": verdict,
+            "추천근거": ", ".join(reasons[:3]),
         })
 
     out = pd.DataFrame(rows)
@@ -340,6 +482,7 @@ def rank_candidates_with_value(candidates, value_df, score, weak_sectors):
     if out.empty:
         return pd.DataFrame(columns=columns)
 
+    # 점수 동률일 때 기존 후보 순서만 따르지 않도록 일자별 순환 보정이 들어간 점수 기준 정렬
     out = out.sort_values(["점수", "거래대금순위"], ascending=[False, True], na_position="last")
     out = out.head(10).reset_index(drop=True)
     out.insert(0, "순위", range(1, len(out) + 1))
@@ -434,6 +577,7 @@ def build_snapshot(score, judgment, strategy, positives, negatives, strong_secto
 st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
 st.title("📊 Daily Market Assistant Auto")
 st.caption("데이터 수집 → 시장 판단 → 거래대금 필터 → 최종 후보 → 기록/스냅샷까지 자동화한 트레이딩 보조 시스템입니다.")
+st.caption("APP VERSION: dynamic-ranking-krx-safe-20260522")
 
 # ===============================
 # Top Guide
